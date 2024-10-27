@@ -101,13 +101,14 @@ class SACAgent(BaseAlgorithm):
     self.use_layer_norm = self.config.get('use_layer_norm', True)
     self.use_dropout = self.config.get('use_dropout', True)
     self.dropout_prob = self.config.get('dropout_prob', 0.1)
+    self.q_target_mode = self.config.get('q_target_mode', 'ave')  # Add this line
+
 
     print(f"[DEBUG] REDQ Config - num_critics: {self.num_critics}, "
           f"critic_subsample_size: {self.m}, "
           f"use_layer_norm: {self.use_layer_norm}, "
           f"use_dropout: {self.use_dropout}, "
           f"dropout_prob: {self.dropout_prob}")
-
 
     def base_init(self, base_name, config):
         self.env_config = config.get('env_config', {})
@@ -333,15 +334,32 @@ class SACAgent(BaseAlgorithm):
             target_Q_values = self.model.sac_network.critic_target(next_obs, next_action)
             print(f"[DEBUG] Target Q Values from all critics: {target_Q_values}")
 
-            # Randomly sample 'm' critics from the ensemble
-            idxs = np.random.choice(self.num_critics, self.m, replace=False)
-            target_Q_values_sampled = target_Q_values[idxs, :]
-            print(f"[DEBUG] Sampled Critic Indices: {idxs}, Sampled Target Q Values: {target_Q_values_sampled}")
+            # # Randomly sample 'm' critics from the ensemble
+            # idxs = np.random.choice(self.num_critics, self.m, replace=False)
+            # target_Q_values_sampled = target_Q_values[idxs, :]
+            # print(f"[DEBUG] Sampled Critic Indices: {idxs}, Sampled Target Q Values: {target_Q_values_sampled}")
 
-            # Compute the minimum of sampled target Q-values
-            target_Q_min = target_Q_values_sampled.min(dim=0)[0].unsqueeze(-1)
-            target_V = target_Q_min - self.alpha * log_prob
-            print(f"[DEBUG] Target V (after minimum): {target_V}")
+            if self.q_target_mode == 'min':
+                # Randomly sample 'm' critics and take the minimum
+                idxs = np.random.choice(self.num_critics, self.m, replace=False)
+                target_Q_sampled = target_Q_values[idxs, :]
+                target_Q_min = target_Q_sampled.min(dim=0)[0].unsqueeze(-1)
+                target_V = target_Q_min - self.alpha * log_prob
+
+            elif self.q_target_mode == 'ave':
+                # Average over all critics
+                target_Q_mean = target_Q_values.mean(dim=0).unsqueeze(-1)
+                target_V = target_Q_mean - self.alpha * log_prob
+
+            elif self.q_target_mode == 'rem':
+                # Random Ensemble Mixture
+                weights = torch.rand(self.num_critics, 1, device=self.device)
+                weights = weights / weights.sum(0)
+                target_Q_weighted = (weights * target_Q_values).sum(dim=0, keepdim=True)
+                target_V = target_Q_weighted - self.alpha * log_prob
+
+            else:
+                raise ValueError(f"Unknown q_target_mode: {self.q_target_mode}")
 
             target_Q = reward + (not_done * self.gamma * target_V)
             target_Q = target_Q.detach()
