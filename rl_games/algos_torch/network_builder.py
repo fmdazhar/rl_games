@@ -94,7 +94,9 @@ class NetworkBuilder:
         activation,
         dense_func,
         norm_only_first_layer=False, 
-        norm_func_name = None):
+        norm_func_name = None,
+        use_dropout=False,
+        dropout_prob=0.0):
             print('build mlp:', input_size)
             in_size = input_size
             layers = []
@@ -111,6 +113,9 @@ class NetworkBuilder:
                     layers.append(torch.nn.LayerNorm(unit))
                 elif norm_func_name == 'batch_norm':
                     layers.append(torch.nn.BatchNorm1d(unit))
+
+                if use_dropout:
+                    layers.append(nn.Dropout(p=dropout_prob))
                 in_size = unit
 
             return nn.Sequential(*layers)
@@ -122,12 +127,15 @@ class NetworkBuilder:
         dense_func, 
         norm_only_first_layer=False,
         norm_func_name = None,
-        d2rl=False):
+        d2rl=False,
+        use_dropout=False,
+        dropout_prob=0.0):
             if d2rl:
                 act_layers = [self.activations_factory.create(activation) for i in range(len(units))]
                 return D2RLNet(input_size, units, act_layers, norm_func_name)
             else:
-                return self._build_sequential_mlp(input_size, units, activation, dense_func, norm_func_name = None,)
+                return self._build_sequential_mlp(input_size, units, activation, dense_func, norm_only_first_layer=norm_only_first_layer, norm_func_name = None,
+                                                  use_dropout=use_dropout, dropout_prob=dropout_prob)
 
         def _build_conv(self, ctype, **kwargs):
             print('conv_name:', ctype)
@@ -902,6 +910,27 @@ class DoubleQCritic(NetworkBuilder.BaseNetwork):
         q2 = self.Q2(obs_action)
 
         return q1, q2
+    
+class EnsembleCritic(NetworkBuilder.BaseNetwork):
+    def __init__(self, num_critics, output_dim, **mlp_args):
+        super().__init__()
+        self.num_critics = num_critics
+        self.critics = nn.ModuleList([
+            self._build_single_critic(output_dim, **mlp_args)
+            for _ in range(num_critics)
+        ])
+
+    def _build_single_critic(self, output_dim, **mlp_args):
+        q_net = self._build_mlp(**mlp_args)
+        last_layer = list(q_net.children())[-2].out_features
+        q_net = nn.Sequential(*list(q_net.children()), nn.Linear(last_layer, output_dim))
+        return q_net
+
+    def forward(self, obs, action):
+        obs_action = torch.cat([obs, action], dim=-1)
+        q_values = [critic(obs_action) for critic in self.critics]
+        q_values = torch.stack(q_values, dim=0)  # Shape: (num_critics, batch_size, 1)
+        return q_values.squeeze(-1)  # Shape: (num_critics, batch_size)
 
 
 class SACBuilder(NetworkBuilder):
@@ -932,7 +961,7 @@ class SACBuilder(NetworkBuilder):
                 'norm_func_name' : self.normalization,
                 'dense_func' : torch.nn.Linear,
                 'd2rl' : self.is_d2rl,
-                'norm_only_first_layer' : self.norm_only_first_layer
+                'norm_only_first_layer' : self.norm_only_first_layer,
             }
 
             critic_mlp_args = {
@@ -942,7 +971,9 @@ class SACBuilder(NetworkBuilder):
                 'norm_func_name' : self.normalization,
                 'dense_func' : torch.nn.Linear,
                 'd2rl' : self.is_d2rl,
-                'norm_only_first_layer' : self.norm_only_first_layer
+                'norm_only_first_layer' : self.norm_only_first_layer,
+                'use_dropout' : self.use_dropout,
+                'dropout_prob' : self.dropout_prob
             }
             print("Building Actor")
             self.actor = self._build_actor(2*action_dim, self.log_std_bounds, **actor_mlp_args)
@@ -966,7 +997,9 @@ class SACBuilder(NetworkBuilder):
                         torch.nn.init.zeros_(m.bias)
 
         def _build_critic(self, output_dim, **mlp_args):
-            return DoubleQCritic(output_dim, **mlp_args)
+            # return DoubleQCritic(output_dim, **mlp_args)
+            return EnsembleCritic(self.num_critics, output_dim, **mlp_args)
+
 
         def _build_actor(self, output_dim, log_std_bounds, **mlp_args):
             return DiagGaussianActor(output_dim, log_std_bounds, **mlp_args)
@@ -994,6 +1027,14 @@ class SACBuilder(NetworkBuilder):
             self.central_value = params.get('central_value', False)
             self.joint_obs_actions_config = params.get('joint_obs_actions', None)
             self.log_std_bounds = params.get('log_std_bounds', None)
+
+            self.num_critics = params.get('num_critics', 10)
+            self.m = params.get('critic_subsample_size', 2)
+            self.use_layer_norm = params.get('use_layer_norm', True)
+            self.use_dropout = params.get('use_dropout', True)
+            self.dropout_prob = params.get('dropout_prob', 0.1)
+            # Assuming policy_delay is defined in your configuration
+            self.policy_delay = config.get("policy_delay", 2)
 
             if self.has_space:
                 self.is_discrete = 'discrete' in params['space']

@@ -91,8 +91,23 @@ class SACAgent(BaseAlgorithm):
         self.algo_observer = config['features']['observer']
 
     def load_networks(self, params):
-        builder = model_builder.ModelBuilder()
-        self.config['network'] = builder.load(params)
+    builder = model_builder.ModelBuilder()
+    self.config['network'] = builder.load(params)
+    print("[DEBUG] Loaded network from ModelBuilder.")
+
+    # Load REDQ-specific parameters
+    self.num_critics = self.config.get('num_critics', 10)
+    self.m = self.config.get('critic_subsample_size', 2)
+    self.use_layer_norm = self.config.get('use_layer_norm', True)
+    self.use_dropout = self.config.get('use_dropout', True)
+    self.dropout_prob = self.config.get('dropout_prob', 0.1)
+
+    print(f"[DEBUG] REDQ Config - num_critics: {self.num_critics}, "
+          f"critic_subsample_size: {self.m}, "
+          f"use_layer_norm: {self.use_layer_norm}, "
+          f"use_dropout: {self.use_dropout}, "
+          f"dropout_prob: {self.dropout_prob}")
+
 
     def base_init(self, base_name, config):
         self.env_config = config.get('env_config', {})
@@ -269,47 +284,122 @@ class SACAgent(BaseAlgorithm):
 
     def set_eval(self):
         self.model.eval()
+        # # Ensure Dropout is active during evaluation
+        # def apply_dropout(m):
+        #     if isinstance(m, nn.Dropout):
+        #         m.train()
+        # self.model.apply(apply_dropout)
 
     def set_train(self):
         self.model.train()
 
+    # def update_critic(self, obs, action, reward, next_obs, not_done, step):
+    #     with torch.no_grad():
+    #         dist = self.model.actor(next_obs)
+    #         next_action = dist.rsample()
+    #         log_prob = dist.log_prob(next_action).sum(-1, keepdim=True)
+
+    #         target_Q1, target_Q2 = self.model.critic_target(next_obs, next_action)
+    #         target_V = torch.min(target_Q1, target_Q2) - self.alpha * log_prob
+
+    #         target_Q = reward + (not_done * self.gamma * target_V)
+    #         target_Q = target_Q.detach()
+
+    #     # get current Q estimates
+    #     current_Q1, current_Q2 = self.model.critic(obs, action)
+
+    #     critic1_loss = self.c_loss(current_Q1, target_Q)
+    #     critic2_loss = self.c_loss(current_Q2, target_Q)
+    #     critic_loss = critic1_loss + critic2_loss 
+    #     self.critic_optimizer.zero_grad(set_to_none=True)
+    #     critic_loss.backward()
+    #     self.critic_optimizer.step()
+
+    #     return critic_loss.detach(), critic1_loss.detach(), critic2_loss.detach()
+
+
     def update_critic(self, obs, action, reward, next_obs, not_done, step):
+        print("[DEBUG] Starting critic update.")
+        
         with torch.no_grad():
             dist = self.model.actor(next_obs)
             next_action = dist.rsample()
             log_prob = dist.log_prob(next_action).sum(-1, keepdim=True)
+            
+            # Print next action and log probability
+            print(f"[DEBUG] Next Action: {next_action}, Log Probability: {log_prob}")
 
-            target_Q1, target_Q2 = self.model.critic_target(next_obs, next_action)
-            target_V = torch.min(target_Q1, target_Q2) - self.alpha * log_prob
+            # Get target Q-values from the ensemble of target critics
+            target_Q_values = self.model.sac_network.critic_target(next_obs, next_action)
+            print(f"[DEBUG] Target Q Values from all critics: {target_Q_values}")
+
+            # Randomly sample 'm' critics from the ensemble
+            idxs = np.random.choice(self.num_critics, self.m, replace=False)
+            target_Q_values_sampled = target_Q_values[idxs, :]
+            print(f"[DEBUG] Sampled Critic Indices: {idxs}, Sampled Target Q Values: {target_Q_values_sampled}")
+
+            # Compute the minimum of sampled target Q-values
+            target_Q_min = target_Q_values_sampled.min(dim=0)[0].unsqueeze(-1)
+            target_V = target_Q_min - self.alpha * log_prob
+            print(f"[DEBUG] Target V (after minimum): {target_V}")
 
             target_Q = reward + (not_done * self.gamma * target_V)
             target_Q = target_Q.detach()
+            print(f"[DEBUG] Target Q: {target_Q}")
 
-        # get current Q estimates
-        current_Q1, current_Q2 = self.model.critic(obs, action)
+        # Get current Q estimates from all critics
+        current_Q_values = self.model.sac_network.critic(obs, action)
+        print(f"[DEBUG] Current Q Values from all critics: {current_Q_values}")
 
-        critic1_loss = self.c_loss(current_Q1, target_Q)
-        critic2_loss = self.c_loss(current_Q2, target_Q)
-        critic_loss = critic1_loss + critic2_loss 
+        # Compute critic loss over all critics
+        critic_losses = []
+        critic_loss = 0
+        for i in range(self.num_critics):
+            current_Q = current_Q_values[i, :].unsqueeze(-1)
+            loss = self.c_loss(current_Q, target_Q)
+            critic_losses.append(loss.detach())
+            critic_loss += loss
+        critic_loss = critic_loss / self.num_critics
+
+
+        print(f"[DEBUG] Critic Loss: {critic_loss}")
+
         self.critic_optimizer.zero_grad(set_to_none=True)
         critic_loss.backward()
         self.critic_optimizer.step()
 
-        return critic_loss.detach(), critic1_loss.detach(), critic2_loss.detach()
+        return critic_loss.detach(), critic_losses
+
 
     def update_actor_and_alpha(self, obs, step):
+        print("[DEBUG] Starting actor and alpha update.")
+        
         for p in self.model.sac_network.critic.parameters():
             p.requires_grad = False
 
         dist = self.model.actor(obs)
         action = dist.rsample()
         log_prob = dist.log_prob(action).sum(-1, keepdim=True)
-        entropy = -log_prob.mean() #dist.entropy().sum(-1, keepdim=True).mean()
-        actor_Q1, actor_Q2 = self.model.critic(obs, action)
-        actor_Q = torch.min(actor_Q1, actor_Q2)
+        entropy = -log_prob.mean()
+        
+        # Print sampled action and log probability
+        print(f"[DEBUG] Action: {action}, Log Probability: {log_prob}, Entropy: {entropy}")
+
+        # Get Q-values from all critics
+        actor_Qs = self.model.sac_network.critic(obs, action)
+        print(f"[DEBUG] Actor Qs from all critics: {actor_Qs}")
+
+        # Log Q-values from all critics
+        for idx in range(self.num_critics):
+            q_values = actor_Qs[idx, :].mean().item()
+            self.writer.add_scalar(f'values/actor_Q_critic_{idx}', q_values, self.frame)
+
+        actor_Q = torch.min(actor_Qs, dim=0)[0].unsqueeze(-1)
+        print(f"[DEBUG] Actor Q (min over critics): {actor_Q}")
 
         actor_loss = (torch.max(self.alpha.detach(), self.min_alpha) * log_prob - actor_Q)
         actor_loss = actor_loss.mean()
+        print(f"[DEBUG] Actor Loss: {actor_loss}")
 
         self.actor_optimizer.zero_grad(set_to_none=True)
         actor_loss.backward()
@@ -319,15 +409,19 @@ class SACAgent(BaseAlgorithm):
             p.requires_grad = True
 
         if self.learnable_temperature:
-            alpha_loss = (self.alpha *
-                          (-log_prob - self.target_entropy).detach()).mean()
+            alpha_loss = (self.alpha * (-log_prob - self.target_entropy).detach()).mean()
+            print(f"[DEBUG] Alpha Loss: {alpha_loss}")
+
             self.log_alpha_optimizer.zero_grad(set_to_none=True)
             alpha_loss.backward()
             self.log_alpha_optimizer.step()
         else:
             alpha_loss = None
 
-        return actor_loss.detach(), entropy.detach(), self.alpha.detach(), alpha_loss # TODO: maybe not self.alpha
+        print(f"[DEBUG] Alpha: {self.alpha.detach()}")
+        
+        return actor_loss.detach(), entropy.detach(), self.alpha.detach(), alpha_loss
+
 
     def soft_update_params(self, net, target_net, tau):
         for param, target_param in zip(net.parameters(), target_net.parameters()):
@@ -340,14 +434,15 @@ class SACAgent(BaseAlgorithm):
 
         obs = self.preproc_obs(obs)
         next_obs = self.preproc_obs(next_obs)
-        critic_loss, critic1_loss, critic2_loss = self.update_critic(obs, action, reward, next_obs, not_done, step)
+        critic_loss, critic_losses = self.update_critic(obs, action, reward, next_obs, not_done, step)
 
-        actor_loss, entropy, alpha, alpha_loss = self.update_actor_and_alpha(obs, step)
+        if step % self.policy_delay == 0:
+            actor_loss, entropy, alpha, alpha_loss = self.update_actor_and_alpha(obs, step)
 
         actor_loss_info = actor_loss, entropy, alpha, alpha_loss
         self.soft_update_params(self.model.sac_network.critic, self.model.sac_network.critic_target,
                                      self.critic_tau)
-        return actor_loss_info, critic1_loss, critic2_loss
+        return actor_loss_info, critic_loss, critic_losses
 
     def preproc_obs(self, obs):
         if isinstance(obs, dict):
@@ -449,8 +544,11 @@ class SACAgent(BaseAlgorithm):
         entropies = []
         alphas = []
         alpha_losses = []
-        critic1_losses = []
-        critic2_losses = []
+        critic_main_losses = []
+        # critic1_losses = []
+        # critic2_losses = []
+        # Initialize lists for individual critic losses
+        critic_losses = [[] for _ in range(self.num_critics)]
 
         obs = self.obs
         if isinstance(obs, dict):
@@ -508,13 +606,18 @@ class SACAgent(BaseAlgorithm):
                 self.set_train()
 
                 update_time_start = time.perf_counter()
-                actor_loss_info, critic1_loss, critic2_loss = self.update(self.epoch_num)
+                actor_loss_info, critic_loss, individual_critic_losses = self.update(self.epoch_num)
                 update_time_end = time.perf_counter()
                 update_time = update_time_end - update_time_start
 
                 self.extract_actor_stats(actor_losses, entropies, alphas, alpha_losses, actor_loss_info)
-                critic1_losses.append(critic1_loss)
-                critic2_losses.append(critic2_loss)
+                critic_main_losses.append(critic_loss)
+                # critic1_losses.append(critic1_loss)
+                # critic2_losses.append(critic2_loss)
+
+                # Collect individual critic losses
+                for i in range(self.num_critics):
+                    critic_losses[i].append(individual_critic_losses[i])
             else:
                 update_time = 0
 
@@ -524,7 +627,7 @@ class SACAgent(BaseAlgorithm):
         total_time = total_time_end - total_time_start
         play_time = total_time - total_update_time
 
-        return step_time, play_time, total_update_time, total_time, actor_losses, entropies, alphas, alpha_losses, critic1_losses, critic2_losses
+        return step_time, play_time, total_update_time, total_time, actor_losses, entropies, alphas, alpha_losses, critic_main_losses, individual_critic_losses
 
     def train_epoch(self):
         random_exploration = self.epoch_num < self.num_warmup_steps
@@ -540,7 +643,7 @@ class SACAgent(BaseAlgorithm):
 
         while True:
             self.epoch_num += 1
-            step_time, play_time, update_time, epoch_total_time, actor_losses, entropies, alphas, alpha_losses, critic1_losses, critic2_losses = self.train_epoch()
+            step_time, play_time, update_time, epoch_total_time, actor_losses, entropies, alphas, alpha_losses, critic_loss, critic_losses = self.train_epoch()
 
             total_time += epoch_total_time
 
@@ -563,13 +666,23 @@ class SACAgent(BaseAlgorithm):
 
             if self.epoch_num >= self.num_warmup_steps:
                 self.writer.add_scalar('losses/a_loss', torch_ext.mean_list(actor_losses).item(), self.frame)
-                self.writer.add_scalar('losses/c1_loss', torch_ext.mean_list(critic1_losses).item(), self.frame)
-                self.writer.add_scalar('losses/c2_loss', torch_ext.mean_list(critic2_losses).item(), self.frame)
+                self.writer.add_scalar('losses/c_loss', torch_ext.mean_list(critic_loss).item(), self.frame)
+                # self.writer.add_scalar('losses/c1_loss', torch_ext.mean_list(critic1_losses).item(), self.frame)
+                # self.writer.add_scalar('losses/c2_loss', torch_ext.mean_list(critic2_losses).item(), self.frame)
+
+                # Log individual critic losses
+                for i in range(self.num_critics):
+                    if critic_losses[i]:
+                        mean_loss = torch_ext.mean_list(critic_losses[i]).item()
+                        self.writer.add_scalar(f'losses/critic_{i}_loss', mean_loss, self.frame)
                 self.writer.add_scalar('losses/entropy', torch_ext.mean_list(entropies).item(), self.frame)
 
                 if alpha_losses[0] is not None:
                     self.writer.add_scalar('losses/alpha_loss', torch_ext.mean_list(alpha_losses).item(), self.frame)
                 self.writer.add_scalar('info/alpha', torch_ext.mean_list(alphas).item(), self.frame)
+
+                
+
 
             self.writer.add_scalar('info/epochs', self.epoch_num, self.frame)
             self.algo_observer.after_print_stats(self.frame, self.epoch_num, total_time)
