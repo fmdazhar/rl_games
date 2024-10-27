@@ -192,7 +192,7 @@ class SACAgent(BaseAlgorithm):
         os.makedirs(self.nn_dir, exist_ok=True)
         os.makedirs(self.summaries_dir, exist_ok=True)
 
-        self.writer = SummaryWriter('runs/' + config['name'] + datetime.now().strftime("_%d-%H-%M-%S"))
+        self.writer = SummaryWriter(self.summaries_dir)
         print("Run Directory:", config['name'] + datetime.now().strftime("_%d-%H-%M-%S"))
 
         self.is_tensor_obses = False
