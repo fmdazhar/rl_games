@@ -91,24 +91,25 @@ class SACAgent(BaseAlgorithm):
         self.algo_observer = config['features']['observer']
 
     def load_networks(self, params):
-    builder = model_builder.ModelBuilder()
-    self.config['network'] = builder.load(params)
-    print("[DEBUG] Loaded network from ModelBuilder.")
+        builder = model_builder.ModelBuilder()
+        self.config['network'] = builder.load(params)
+        print("[DEBUG] Loaded network from ModelBuilder.")
 
-    # Load REDQ-specific parameters
-    self.num_critics = self.config.get('num_critics', 10)
-    self.m = self.config.get('critic_subsample_size', 2)
-    self.use_layer_norm = self.config.get('use_layer_norm', True)
-    self.use_dropout = self.config.get('use_dropout', True)
-    self.dropout_prob = self.config.get('dropout_prob', 0.1)
-    self.q_target_mode = self.config.get('q_target_mode', 'ave')  # Add this line
+        # Load REDQ-specific parameters
+        self.num_critics = self.config.get('num_critics', 10)
+        self.m = self.config.get('critic_subsample_size', 2)
+        self.use_layer_norm = self.config.get('use_layer_norm', False)
+        self.use_dropout = self.config.get('use_dropout', False)
+        self.dropout_prob = self.config.get('dropout_prob', 0.1)
+        self.policy_delay = params.get("policy_delay", 2)
+        self.q_target_mode = self.config.get('q_target_mode', 'ave')  # Add this line
 
 
-    print(f"[DEBUG] REDQ Config - num_critics: {self.num_critics}, "
-          f"critic_subsample_size: {self.m}, "
-          f"use_layer_norm: {self.use_layer_norm}, "
-          f"use_dropout: {self.use_dropout}, "
-          f"dropout_prob: {self.dropout_prob}")
+        print(f"[DEBUG] REDQ Config - num_critics: {self.num_critics}, "
+            f"critic_subsample_size: {self.m}, "
+            f"use_layer_norm: {self.use_layer_norm}, "
+            f"use_dropout: {self.use_dropout}, "
+            f"dropout_prob: {self.dropout_prob}")
 
     def base_init(self, base_name, config):
         self.env_config = config.get('env_config', {})
@@ -320,7 +321,7 @@ class SACAgent(BaseAlgorithm):
 
 
     def update_critic(self, obs, action, reward, next_obs, not_done, step):
-        print("[DEBUG] Starting critic update.")
+        # print("[DEBUG] Starting critic update.")
         
         with torch.no_grad():
             dist = self.model.actor(next_obs)
@@ -328,11 +329,11 @@ class SACAgent(BaseAlgorithm):
             log_prob = dist.log_prob(next_action).sum(-1, keepdim=True)
             
             # Print next action and log probability
-            print(f"[DEBUG] Next Action: {next_action}, Log Probability: {log_prob}")
+            # print(f"[DEBUG] Next Action: {next_action}, Log Probability: {log_prob}")
 
             # Get target Q-values from the ensemble of target critics
             target_Q_values = self.model.sac_network.critic_target(next_obs, next_action)
-            print(f"[DEBUG] Target Q Values from all critics: {target_Q_values}")
+            # print(f"[DEBUG] Target Q Values from all critics: {target_Q_values}")
 
             # # Randomly sample 'm' critics from the ensemble
             # idxs = np.random.choice(self.num_critics, self.m, replace=False)
@@ -363,11 +364,11 @@ class SACAgent(BaseAlgorithm):
 
             target_Q = reward + (not_done * self.gamma * target_V)
             target_Q = target_Q.detach()
-            print(f"[DEBUG] Target Q: {target_Q}")
+            # print(f"[DEBUG] Target Q: {target_Q}")
 
         # Get current Q estimates from all critics
         current_Q_values = self.model.sac_network.critic(obs, action)
-        print(f"[DEBUG] Current Q Values from all critics: {current_Q_values}")
+        # print(f"[DEBUG] Current Q Values from all critics: {current_Q_values}")
 
         # Compute critic loss over all critics
         critic_losses = []
@@ -380,7 +381,7 @@ class SACAgent(BaseAlgorithm):
         critic_loss = critic_loss / self.num_critics
 
 
-        print(f"[DEBUG] Critic Loss: {critic_loss}")
+        # print(f"[DEBUG] Critic Loss: {critic_loss}")
 
         self.critic_optimizer.zero_grad(set_to_none=True)
         critic_loss.backward()
@@ -390,7 +391,7 @@ class SACAgent(BaseAlgorithm):
 
 
     def update_actor_and_alpha(self, obs, step):
-        print("[DEBUG] Starting actor and alpha update.")
+        # print("[DEBUG] Starting actor and alpha update.")
         
         for p in self.model.sac_network.critic.parameters():
             p.requires_grad = False
@@ -401,11 +402,11 @@ class SACAgent(BaseAlgorithm):
         entropy = -log_prob.mean()
         
         # Print sampled action and log probability
-        print(f"[DEBUG] Action: {action}, Log Probability: {log_prob}, Entropy: {entropy}")
+        # print(f"[DEBUG] Action: {action}, Log Probability: {log_prob}, Entropy: {entropy}")
 
         # Get Q-values from all critics
         actor_Qs = self.model.sac_network.critic(obs, action)
-        print(f"[DEBUG] Actor Qs from all critics: {actor_Qs}")
+        # print(f"[DEBUG] Actor Qs from all critics: {actor_Qs}")
 
         # Log Q-values from all critics
         for idx in range(self.num_critics):
@@ -413,11 +414,11 @@ class SACAgent(BaseAlgorithm):
             self.writer.add_scalar(f'values/actor_Q_critic_{idx}', q_values, self.frame)
 
         actor_Q = torch.min(actor_Qs, dim=0)[0].unsqueeze(-1)
-        print(f"[DEBUG] Actor Q (min over critics): {actor_Q}")
+        # print(f"[DEBUG] Actor Q (min over critics): {actor_Q}")
 
         actor_loss = (torch.max(self.alpha.detach(), self.min_alpha) * log_prob - actor_Q)
         actor_loss = actor_loss.mean()
-        print(f"[DEBUG] Actor Loss: {actor_loss}")
+        # print(f"[DEBUG] Actor Loss: {actor_loss}")
 
         self.actor_optimizer.zero_grad(set_to_none=True)
         actor_loss.backward()
@@ -428,7 +429,7 @@ class SACAgent(BaseAlgorithm):
 
         if self.learnable_temperature:
             alpha_loss = (self.alpha * (-log_prob - self.target_entropy).detach()).mean()
-            print(f"[DEBUG] Alpha Loss: {alpha_loss}")
+            # print(f"[DEBUG] Alpha Loss: {alpha_loss}")
 
             self.log_alpha_optimizer.zero_grad(set_to_none=True)
             alpha_loss.backward()
@@ -436,7 +437,7 @@ class SACAgent(BaseAlgorithm):
         else:
             alpha_loss = None
 
-        print(f"[DEBUG] Alpha: {self.alpha.detach()}")
+        # print(f"[DEBUG] Alpha: {self.alpha.detach()}")
         
         return actor_loss.detach(), entropy.detach(), self.alpha.detach(), alpha_loss
 
@@ -454,13 +455,17 @@ class SACAgent(BaseAlgorithm):
         next_obs = self.preproc_obs(next_obs)
         critic_loss, critic_losses = self.update_critic(obs, action, reward, next_obs, not_done, step)
 
+        # Check if this is the first step or if actor_loss_info has not been initialized
+        if step == 0 or not hasattr(self, 'actor_loss_info'):
+            self.actor_loss_info = (0, 0, 0, 0)  # Initialize with default values if needed
+
         if step % self.policy_delay == 0:
             actor_loss, entropy, alpha, alpha_loss = self.update_actor_and_alpha(obs, step)
+            self.actor_loss_info = actor_loss, entropy, alpha, alpha_loss
 
-        actor_loss_info = actor_loss, entropy, alpha, alpha_loss
         self.soft_update_params(self.model.sac_network.critic, self.model.sac_network.critic_target,
                                      self.critic_tau)
-        return actor_loss_info, critic_loss, critic_losses
+        return self.actor_loss_info, critic_loss, critic_losses
 
     def preproc_obs(self, obs):
         if isinstance(obs, dict):
@@ -645,7 +650,7 @@ class SACAgent(BaseAlgorithm):
         total_time = total_time_end - total_time_start
         play_time = total_time - total_update_time
 
-        return step_time, play_time, total_update_time, total_time, actor_losses, entropies, alphas, alpha_losses, critic_main_losses, individual_critic_losses
+        return step_time, play_time, total_update_time, total_time, actor_losses, entropies, alphas, alpha_losses, critic_main_losses, critic_losses
 
     def train_epoch(self):
         random_exploration = self.epoch_num < self.num_warmup_steps

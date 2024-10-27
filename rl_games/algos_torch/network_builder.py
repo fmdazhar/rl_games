@@ -922,7 +922,8 @@ class EnsembleCritic(NetworkBuilder.BaseNetwork):
 
     def _build_single_critic(self, output_dim, **mlp_args):
         q_net = self._build_mlp(**mlp_args)
-        last_layer = list(q_net.children())[-2].out_features
+        # last_layer = list(q_net.children())[-2].out_features
+        last_layer = [layer for layer in q_net.children() if isinstance(layer, nn.Linear)][-1].out_features
         q_net = nn.Sequential(*list(q_net.children()), nn.Linear(last_layer, output_dim))
         return q_net
 
@@ -1030,11 +1031,11 @@ class SACBuilder(NetworkBuilder):
 
             self.num_critics = params.get('num_critics', 10)
             self.m = params.get('critic_subsample_size', 2)
-            self.use_layer_norm = params.get('use_layer_norm', True)
+            self.use_layer_norm = params.get('use_layer_norm', False)
             self.use_dropout = params.get('use_dropout', True)
-            self.dropout_prob = params.get('dropout_prob', 0.1)
+            self.dropout_prob = params.get('dropout_prob', 0.01)
             # Assuming policy_delay is defined in your configuration
-            self.policy_delay = config.get("policy_delay", 2)
+            self.policy_delay = params.get("policy_delay", 2)
 
             if self.has_space:
                 self.is_discrete = 'discrete' in params['space']
