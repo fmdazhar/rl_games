@@ -454,6 +454,10 @@ class SACAgent(BaseAlgorithm):
             # Update critic
             critic_loss, critic_losses = self.update_critic(obs_i, action_i, reward_i, next_obs_i, not_done_i)
 
+            # Initialize actor_loss_info if not already set
+            if not hasattr(self, 'actor_loss_info'):
+                self.actor_loss_info = (torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0))
+
             # Update actor and alpha if needed
             if self.update_step % self.policy_delay == 0:
                 actor_loss, entropy, alpha, alpha_loss = self.update_actor_and_alpha(obs_i)
