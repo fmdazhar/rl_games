@@ -91,6 +91,8 @@ class SACAgent(BaseAlgorithm):
 
         self.algo_observer = config['features']['observer']
 
+        self.update_step = 0  # Initialize the update counter
+
     def load_networks(self, params):
         builder = model_builder.ModelBuilder()
         self.config['network'] = builder.load(params)
@@ -301,7 +303,7 @@ class SACAgent(BaseAlgorithm):
         self.model.train()
 
 
-    def update_critic(self, obs, action, reward, next_obs, not_done, step):
+    def update_critic(self, obs, action, reward, next_obs, not_done):
         # print("[DEBUG] Starting critic update.")
         
         with torch.no_grad():
@@ -362,15 +364,12 @@ class SACAgent(BaseAlgorithm):
 
         critic_loss = critic_loss / self.num_critics
 
-
         # print(f"[DEBUG] Critic Loss: {critic_loss}")
-
-        
 
         return critic_loss.detach(), critic_losses
 
 
-    def update_actor_and_alpha(self, obs, step):
+    def update_actor_and_alpha(self, obs):
         # print("[DEBUG] Starting actor and alpha update.")
         
         for p in self.model.sac_network.critic.parameters():
@@ -427,32 +426,46 @@ class SACAgent(BaseAlgorithm):
             target_param.data.copy_(tau * param.data +
                                     (1.0 - tau) * target_param.data)
 
-    def update(self, step):
+    def update(self):
+        total_batch_size = min(self.batch_size * self.gradient_steps, len(self.replay_buffer))
+        obs, action, reward, next_obs, done = self.replay_buffer.sample(total_batch_size)
 
-        # Calculate adjusted batch size based on UTD ratio, limited by replay buffer size
-        adjusted_batch_size = min(self.batch_size * self.gradient_steps, len(self.replay_buffer))
+        # Ensure total_batch_size is divisible by gradient_steps
+        if total_batch_size % self.gradient_steps != 0:
+            print(f"Total batch size {total_batch_size} is not divisible by gradient_steps {self.gradient_steps}.")
 
-        obs, action, reward, next_obs, done = self.replay_buffer.sample(adjusted_batch_size)
-        not_done = ~done
+        obs_batches = obs.view(self.gradient_steps, self.batch_size, *obs.shape[1:])
+        action_batches = action.view(self.gradient_steps, self.batch_size, *action.shape[1:])
+        reward_batches = reward.view(self.gradient_steps, self.batch_size, *reward.shape[1:])
+        next_obs_batches = next_obs.view(self.gradient_steps, self.batch_size, *next_obs.shape[1:])
+        done_batches = done.view(self.gradient_steps, self.batch_size, *done.shape[1:])
 
-        obs = self.preproc_obs(obs)
-        next_obs = self.preproc_obs(next_obs)
+        for i in range(self.gradient_steps):
+            obs_i = obs_batches[i]
+            action_i = action_batches[i]
+            reward_i = reward_batches[i]
+            next_obs_i = next_obs_batches[i]
+            done_i = done_batches[i]
+            not_done_i = ~done_i
 
-        # Apply multiple gradient updates for critic (high UTD ratio)
-        for _ in range(self.gradient_steps):
-            critic_loss, critic_losses = self.update_critic(obs, action, reward, next_obs, not_done, step)
+            obs_i = self.preproc_obs(obs_i)
+            next_obs_i = self.preproc_obs(next_obs_i)
 
-        # Check if this is the first step or if actor_loss_info has not been initialized
-        if not hasattr(self, 'actor_loss_info'):
-            self.actor_loss_info = (0, 0, 0, 0)  # Initialize with default values if needed
+            # Update critic
+            critic_loss, critic_losses = self.update_critic(obs_i, action_i, reward_i, next_obs_i, not_done_i)
 
-        if step % self.policy_delay == 0:
-            actor_loss, entropy, alpha, alpha_loss = self.update_actor_and_alpha(obs, step)
-            self.actor_loss_info = actor_loss, entropy, alpha, alpha_loss
+            # Update actor and alpha if needed
+            if self.update_step % self.policy_delay == 0:
+                actor_loss, entropy, alpha, alpha_loss = self.update_actor_and_alpha(obs_i)
+                self.actor_loss_info = actor_loss, entropy, alpha, alpha_loss
 
-        self.soft_update_params(self.model.sac_network.critic, self.model.sac_network.critic_target,
-                                     self.critic_tau)
+            # Soft-update target networks
+            self.soft_update_params(self.model.sac_network.critic, self.model.sac_network.critic_target, self.critic_tau)
+
+            self.update_step += 1  # Increment the update counter
+
         return self.actor_loss_info, critic_loss, critic_losses
+
 
     def preproc_obs(self, obs):
         if isinstance(obs, dict):
@@ -616,7 +629,7 @@ class SACAgent(BaseAlgorithm):
                 self.set_train()
 
                 update_time_start = time.perf_counter()
-                actor_loss_info, critic_loss, individual_critic_losses = self.update(self.epoch_num)
+                actor_loss_info, critic_loss, individual_critic_losses = self.update()
                 update_time_end = time.perf_counter()
                 update_time = update_time_end - update_time_start
 
