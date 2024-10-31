@@ -1035,8 +1035,9 @@ class SACBuilder(NetworkBuilder):
             self.use_dropout = params.get('use_dropout', True)
             self.dropout_prob = params.get('dropout_prob', 0.01)
             # Assuming policy_delay is defined in your configuration
-            self.policy_delay = params.get("policy_delay", 1)
+            self.policy_delay = params.get("policy_delay", 1) 
             self.gradient_steps = params.get('gradient_steps', 1)  # Default of 1 gradient step per env step
+            self.policy_delay_offset = params.get('policy_delay_offset', 0) # Default of 0 offset
 
 
             if self.has_space:

@@ -92,6 +92,7 @@ class SACAgent(BaseAlgorithm):
         self.algo_observer = config['features']['observer']
 
         self.update_step = 0  # Initialize the update counter
+        self.actor_loss_info = (torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0))
 
     def load_networks(self, params):
         builder = model_builder.ModelBuilder()
@@ -106,6 +107,7 @@ class SACAgent(BaseAlgorithm):
         self.dropout_prob = self.config.get('dropout_prob', 0.01)
         self.policy_delay = self.config.get("policy_delay", 1)
         self.gradient_steps = self.config.get('gradient_steps', 1)  # Default of 1 gradient step per env step
+        self.policy_delay_offset = self.config.get('policy_delay_offset', 0)
         self.q_target_mode = self.config.get('q_target_mode', 'ave')  # Add this line
 
 
@@ -203,6 +205,8 @@ class SACAgent(BaseAlgorithm):
         self.is_rnn = False
         self.last_rnn_indices = None
         self.last_state_indices = None
+
+        self.log_freq = config.get('log_frequency', 1)
 
     def init_tensors(self):
         if self.observation_space.dtype == np.uint8:
@@ -454,12 +458,8 @@ class SACAgent(BaseAlgorithm):
             # Update critic
             critic_loss, critic_losses = self.update_critic(obs_i, action_i, reward_i, next_obs_i, not_done_i)
 
-            # Initialize actor_loss_info if not already set
-            if not hasattr(self, 'actor_loss_info'):
-                self.actor_loss_info = (torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0))
-
             # Update actor and alpha if needed
-            if self.update_step % self.policy_delay == 0:
+            if (self.update_step + self.policy_delay_offset)% self.policy_delay == 0:
                 actor_loss, entropy, alpha, alpha_loss = self.update_actor_and_alpha(obs_i)
                 self.actor_loss_info = actor_loss, entropy, alpha, alpha_loss
 
@@ -678,34 +678,32 @@ class SACAgent(BaseAlgorithm):
 
             print_statistics(self.print_stats, curr_frames, step_time, play_time, epoch_total_time, 
                 self.epoch_num, self.max_epochs, self.frame, self.max_frames)
+            
+            if self.epoch_num % self.log_freq == 0:
+                self.writer.add_scalar('performance/step_inference_rl_update_fps', fps_total, self.frame)
+                self.writer.add_scalar('performance/step_inference_fps', fps_step_inference, self.frame)
+                self.writer.add_scalar('performance/step_fps', fps_step, self.frame)
+                self.writer.add_scalar('performance/rl_update_time', update_time, self.frame)
+                self.writer.add_scalar('performance/step_inference_time', play_time, self.frame)
+                self.writer.add_scalar('performance/step_time', step_time, self.frame)
 
-            self.writer.add_scalar('performance/step_inference_rl_update_fps', fps_total, self.frame)
-            self.writer.add_scalar('performance/step_inference_fps', fps_step_inference, self.frame)
-            self.writer.add_scalar('performance/step_fps', fps_step, self.frame)
-            self.writer.add_scalar('performance/rl_update_time', update_time, self.frame)
-            self.writer.add_scalar('performance/step_inference_time', play_time, self.frame)
-            self.writer.add_scalar('performance/step_time', step_time, self.frame)
+                if self.epoch_num >= self.num_warmup_steps:
+                    self.writer.add_scalar('losses/a_loss', torch_ext.mean_list(actor_losses).item(), self.frame)
+                    self.writer.add_scalar('losses/c_loss', torch_ext.mean_list(critic_loss).item(), self.frame)
 
-            if self.epoch_num >= self.num_warmup_steps:
-                self.writer.add_scalar('losses/a_loss', torch_ext.mean_list(actor_losses).item(), self.frame)
-                self.writer.add_scalar('losses/c_loss', torch_ext.mean_list(critic_loss).item(), self.frame)
+                    # Log individual critic losses
+                    for i in range(self.num_critics):
+                        if critic_losses[i]:
+                            mean_loss = torch_ext.mean_list(critic_losses[i]).item()
+                            self.writer.add_scalar(f'losses/critic_{i}_loss', mean_loss, self.frame)
+                    self.writer.add_scalar('losses/entropy', torch_ext.mean_list(entropies).item(), self.frame)
 
-                # Log individual critic losses
-                for i in range(self.num_critics):
-                    if critic_losses[i]:
-                        mean_loss = torch_ext.mean_list(critic_losses[i]).item()
-                        self.writer.add_scalar(f'losses/critic_{i}_loss', mean_loss, self.frame)
-                self.writer.add_scalar('losses/entropy', torch_ext.mean_list(entropies).item(), self.frame)
+                    if alpha_losses[0] is not None:
+                        self.writer.add_scalar('losses/alpha_loss', torch_ext.mean_list(alpha_losses).item(), self.frame)
+                    self.writer.add_scalar('info/alpha', torch_ext.mean_list(alphas).item(), self.frame)
 
-                if alpha_losses[0] is not None:
-                    self.writer.add_scalar('losses/alpha_loss', torch_ext.mean_list(alpha_losses).item(), self.frame)
-                self.writer.add_scalar('info/alpha', torch_ext.mean_list(alphas).item(), self.frame)
-
-                
-
-
-            self.writer.add_scalar('info/epochs', self.epoch_num, self.frame)
-            self.algo_observer.after_print_stats(self.frame, self.epoch_num, total_time)
+                self.writer.add_scalar('info/epochs', self.epoch_num, self.frame)
+                self.algo_observer.after_print_stats(self.frame, self.epoch_num, total_time)
 
             if self.game_rewards.current_size > 0:
                 mean_rewards = self.game_rewards.get_mean()
