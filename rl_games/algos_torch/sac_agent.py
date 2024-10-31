@@ -568,9 +568,6 @@ class SACAgent(BaseAlgorithm):
         alphas = []
         alpha_losses = []
         critic_main_losses = []
-        # critic1_losses = []
-        # critic2_losses = []
-        # Initialize lists for individual critic losses
         critic_losses = [[] for _ in range(self.num_critics)]
 
         obs = self.obs
@@ -635,8 +632,6 @@ class SACAgent(BaseAlgorithm):
 
                 self.extract_actor_stats(actor_losses, entropies, alphas, alpha_losses, actor_loss_info)
                 critic_main_losses.append(critic_loss)
-                # critic1_losses.append(critic1_loss)
-                # critic2_losses.append(critic2_loss)
 
                 # Collect individual critic losses
                 for i in range(self.num_critics):
@@ -690,8 +685,6 @@ class SACAgent(BaseAlgorithm):
             if self.epoch_num >= self.num_warmup_steps:
                 self.writer.add_scalar('losses/a_loss', torch_ext.mean_list(actor_losses).item(), self.frame)
                 self.writer.add_scalar('losses/c_loss', torch_ext.mean_list(critic_loss).item(), self.frame)
-                # self.writer.add_scalar('losses/c1_loss', torch_ext.mean_list(critic1_losses).item(), self.frame)
-                # self.writer.add_scalar('losses/c2_loss', torch_ext.mean_list(critic2_losses).item(), self.frame)
 
                 # Log individual critic losses
                 for i in range(self.num_critics):
