@@ -1031,11 +1031,13 @@ class SACBuilder(NetworkBuilder):
 
             self.num_critics = params.get('num_critics', 10)
             self.m = params.get('critic_subsample_size', 2)
-            self.use_layer_norm = params.get('use_layer_norm', False)
+            self.use_layer_norm = params.get('use_layer_norm', True)
             self.use_dropout = params.get('use_dropout', True)
             self.dropout_prob = params.get('dropout_prob', 0.01)
             # Assuming policy_delay is defined in your configuration
-            self.policy_delay = params.get("policy_delay", 2)
+            self.policy_delay = params.get("policy_delay", 1)
+            self.gradient_steps = params.get('gradient_steps', 1)  # Default of 1 gradient step per env step
+
 
             if self.has_space:
                 self.is_discrete = 'discrete' in params['space']

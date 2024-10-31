@@ -72,9 +72,10 @@ class SACAgent(BaseAlgorithm):
                                                 lr=float(self.config['actor_lr']),
                                                 betas=self.config.get("actor_betas", [0.9, 0.999]))
 
-        self.critic_optimizer = torch.optim.Adam(self.model.sac_network.critic.parameters(),
-                                                 lr=float(self.config["critic_lr"]),
-                                                 betas=self.config.get("critic_betas", [0.9, 0.999]))
+        self.critic_optimizers = [
+            torch.optim.Adam(critic.parameters(), lr=float(self.config["critic_lr"]), betas=self.config.get("critic_betas", [0.9, 0.999]))
+            for critic in self.model.sac_network.critics
+        ]
 
         self.log_alpha_optimizer = torch.optim.Adam([self.log_alpha],
                                                     lr=float(self.config["alpha_lr"]),
@@ -98,10 +99,11 @@ class SACAgent(BaseAlgorithm):
         # Load REDQ-specific parameters
         self.num_critics = self.config.get('num_critics', 10)
         self.m = self.config.get('critic_subsample_size', 2)
-        self.use_layer_norm = self.config.get('use_layer_norm', False)
-        self.use_dropout = self.config.get('use_dropout', False)
-        self.dropout_prob = self.config.get('dropout_prob', 0.1)
-        self.policy_delay = params.get("policy_delay", 2)
+        self.use_layer_norm = self.config.get('use_layer_norm', True)
+        self.use_dropout = self.config.get('use_dropout', True)
+        self.dropout_prob = self.config.get('dropout_prob', 0.01)
+        self.policy_delay = self.config.get("policy_delay", 1)
+        self.gradient_steps = self.config.get('gradient_steps', 1)  # Default of 1 gradient step per env step
         self.q_target_mode = self.config.get('q_target_mode', 'ave')  # Add this line
 
 
@@ -248,7 +250,8 @@ class SACAgent(BaseAlgorithm):
         state['epoch'] = self.epoch_num
         state['frame'] = self.frame
         state['actor_optimizer'] = self.actor_optimizer.state_dict()
-        state['critic_optimizer'] = self.critic_optimizer.state_dict()
+        # Store all individual critic optimizer states
+        state['critic_optimizers'] = [opt.state_dict() for opt in self.critic_optimizers]
         state['log_alpha_optimizer'] = self.log_alpha_optimizer.state_dict()        
 
         return state
@@ -261,7 +264,9 @@ class SACAgent(BaseAlgorithm):
             self.frame = weights['frame']
 
         self.actor_optimizer.load_state_dict(weights['actor_optimizer'])
-        self.critic_optimizer.load_state_dict(weights['critic_optimizer'])
+        # Load each critic optimizer state individually
+        for opt, opt_state in zip(self.critic_optimizers, weights['critic_optimizers']):
+            opt.load_state_dict(opt_state)
         self.log_alpha_optimizer.load_state_dict(weights['log_alpha_optimizer'])
 
         self.last_mean_rewards = weights.get('last_mean_rewards', -1000000000)
@@ -295,30 +300,6 @@ class SACAgent(BaseAlgorithm):
     def set_train(self):
         self.model.train()
 
-    # def update_critic(self, obs, action, reward, next_obs, not_done, step):
-    #     with torch.no_grad():
-    #         dist = self.model.actor(next_obs)
-    #         next_action = dist.rsample()
-    #         log_prob = dist.log_prob(next_action).sum(-1, keepdim=True)
-
-    #         target_Q1, target_Q2 = self.model.critic_target(next_obs, next_action)
-    #         target_V = torch.min(target_Q1, target_Q2) - self.alpha * log_prob
-
-    #         target_Q = reward + (not_done * self.gamma * target_V)
-    #         target_Q = target_Q.detach()
-
-    #     # get current Q estimates
-    #     current_Q1, current_Q2 = self.model.critic(obs, action)
-
-    #     critic1_loss = self.c_loss(current_Q1, target_Q)
-    #     critic2_loss = self.c_loss(current_Q2, target_Q)
-    #     critic_loss = critic1_loss + critic2_loss 
-    #     self.critic_optimizer.zero_grad(set_to_none=True)
-    #     critic_loss.backward()
-    #     self.critic_optimizer.step()
-
-    #     return critic_loss.detach(), critic1_loss.detach(), critic2_loss.detach()
-
 
     def update_critic(self, obs, action, reward, next_obs, not_done, step):
         # print("[DEBUG] Starting critic update.")
@@ -334,11 +315,6 @@ class SACAgent(BaseAlgorithm):
             # Get target Q-values from the ensemble of target critics
             target_Q_values = self.model.sac_network.critic_target(next_obs, next_action)
             # print(f"[DEBUG] Target Q Values from all critics: {target_Q_values}")
-
-            # # Randomly sample 'm' critics from the ensemble
-            # idxs = np.random.choice(self.num_critics, self.m, replace=False)
-            # target_Q_values_sampled = target_Q_values[idxs, :]
-            # print(f"[DEBUG] Sampled Critic Indices: {idxs}, Sampled Target Q Values: {target_Q_values_sampled}")
 
             if self.q_target_mode == 'min':
                 # Randomly sample 'm' critics and take the minimum
@@ -378,14 +354,18 @@ class SACAgent(BaseAlgorithm):
             loss = self.c_loss(current_Q, target_Q)
             critic_losses.append(loss.detach())
             critic_loss += loss
+
+            # Update the critic using its specific optimizer
+            self.critic_optimizers[i].zero_grad(set_to_none=True)
+            loss.backward()
+            self.critic_optimizers[i].step()
+
         critic_loss = critic_loss / self.num_critics
 
 
         # print(f"[DEBUG] Critic Loss: {critic_loss}")
 
-        self.critic_optimizer.zero_grad(set_to_none=True)
-        critic_loss.backward()
-        self.critic_optimizer.step()
+        
 
         return critic_loss.detach(), critic_losses
 
@@ -448,15 +428,22 @@ class SACAgent(BaseAlgorithm):
                                     (1.0 - tau) * target_param.data)
 
     def update(self, step):
-        obs, action, reward, next_obs, done = self.replay_buffer.sample(self.batch_size)
+
+        # Calculate adjusted batch size based on UTD ratio, limited by replay buffer size
+        adjusted_batch_size = min(self.batch_size * self.gradient_steps, len(self.replay_buffer))
+
+        obs, action, reward, next_obs, done = self.replay_buffer.sample(adjusted_batch_size)
         not_done = ~done
 
         obs = self.preproc_obs(obs)
         next_obs = self.preproc_obs(next_obs)
-        critic_loss, critic_losses = self.update_critic(obs, action, reward, next_obs, not_done, step)
+
+        # Apply multiple gradient updates for critic (high UTD ratio)
+        for _ in range(self.gradient_steps):
+            critic_loss, critic_losses = self.update_critic(obs, action, reward, next_obs, not_done, step)
 
         # Check if this is the first step or if actor_loss_info has not been initialized
-        if step == 0 or not hasattr(self, 'actor_loss_info'):
+        if not hasattr(self, 'actor_loss_info'):
             self.actor_loss_info = (0, 0, 0, 0)  # Initialize with default values if needed
 
         if step % self.policy_delay == 0:
