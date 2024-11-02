@@ -315,11 +315,11 @@ class SACAgent(BaseAlgorithm):
             next_action = dist.rsample()
             log_prob = dist.log_prob(next_action).sum(-1, keepdim=True)
             
-            # Print next action and log probability
             # print(f"[DEBUG] Next Action: {next_action}, Log Probability: {log_prob}")
 
             # Get target Q-values from the ensemble of target critics
             target_Q_values = self.model.sac_network.critic_target(next_obs, next_action)
+            assert target_Q_values.shape == (self.num_critics, batch_size, 1), f"Unexpected shape for target_Q_values: {target_Q_values.shape}"
             # print(f"[DEBUG] Target Q Values from all critics: {target_Q_values}")
 
             if self.q_target_mode == 'min':
@@ -390,6 +390,7 @@ class SACAgent(BaseAlgorithm):
         # Get Q-values from all critics
         actor_Qs = self.model.sac_network.critic(obs, action)
         # print(f"[DEBUG] Actor Qs from all critics: {actor_Qs}")
+        assert actor_Qs.shape == (self.num_critics, batch_size, 1), f"Unexpected shape for actor_Qs: {actor_Qs.shape}"
 
         # Log Q-values from all critics
         for idx in range(self.num_critics):
@@ -397,6 +398,7 @@ class SACAgent(BaseAlgorithm):
             self.writer.add_scalar(f'values/actor_Q_critic_{idx}', q_values, self.frame)
 
         actor_Q = torch.min(actor_Qs, dim=0)[0].unsqueeze(-1)
+        assert actor_Q.shape == (batch_size, 1), f"Unexpected shape for actor_Q: {actor_Q.shape}"
         # print(f"[DEBUG] Actor Q (min over critics): {actor_Q}")
 
         actor_loss = (torch.max(self.alpha.detach(), self.min_alpha) * log_prob - actor_Q)

@@ -929,8 +929,12 @@ class EnsembleCritic(NetworkBuilder.BaseNetwork):
 
     def forward(self, obs, action):
         obs_action = torch.cat([obs, action], dim=-1)
+        assert obs_action.shape[-1] == (obs.shape[-1] + action.shape[-1]), f"Unexpected shape for obs_action: {obs_action.shape}"
+
         q_values = [critic(obs_action) for critic in self.critics]
         q_values = torch.stack(q_values, dim=0)  # Shape: (num_critics, batch_size, 1)
+        assert q_values.shape[0] == self.num_critics, f"Unexpected number of critics: {q_values.shape[0]}"
+        
         return q_values.squeeze(-1)  # Shape: (num_critics, batch_size)
 
 
