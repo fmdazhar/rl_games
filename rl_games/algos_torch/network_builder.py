@@ -279,7 +279,9 @@ class A2CBuilder(NetworkBuilder):
                 'norm_func_name' : self.normalization,
                 'dense_func' : torch.nn.Linear,
                 'd2rl' : self.is_d2rl,
-                'norm_only_first_layer' : self.norm_only_first_layer
+                'norm_only_first_layer' : self.norm_only_first_layer,
+                'use_dropout' : self.use_dropout,
+                'dropout_prob' : self.dropout_prob
             }
             self.actor_mlp = self._build_mlp(**mlp_args)
             if self.separate:
@@ -968,7 +970,6 @@ class SACBuilder(NetworkBuilder):
                 'd2rl' : self.is_d2rl,
                 'norm_only_first_layer' : self.norm_only_first_layer,
             }
-
             critic_mlp_args = {
                 'input_size' : obs_dim + action_dim, 
                 'units' : self.units, 
@@ -978,7 +979,7 @@ class SACBuilder(NetworkBuilder):
                 'd2rl' : self.is_d2rl,
                 'norm_only_first_layer' : self.norm_only_first_layer,
                 'use_dropout' : self.use_dropout,
-                'dropout_prob' : self.dropout_prob
+                'dropout_prob' : self.dropout_prob,
             }
             print("Building Actor")
             self.actor = self._build_actor(2*action_dim, self.log_std_bounds, **actor_mlp_args)
@@ -1034,15 +1035,8 @@ class SACBuilder(NetworkBuilder):
             self.log_std_bounds = params.get('log_std_bounds', None)
 
             self.num_critics = params.get('num_critics', 10)
-            self.m = params.get('critic_subsample_size', 2)
-            self.use_layer_norm = params.get('use_layer_norm', True)
             self.use_dropout = params.get('use_dropout', True)
             self.dropout_prob = params.get('dropout_prob', 0.01)
-            # Assuming policy_delay is defined in your configuration
-            self.policy_delay = params.get("policy_delay", 1) 
-            self.gradient_steps = params.get('gradient_steps', 1)  # Default of 1 gradient step per env step
-            self.policy_delay_offset = params.get('policy_delay_offset', 0) # Default of 0 offset
-
 
             if self.has_space:
                 self.is_discrete = 'discrete' in params['space']

@@ -38,6 +38,17 @@ class SACAgent(BaseAlgorithm):
         self.num_steps_per_episode = config.get("num_steps_per_episode", 1)
         self.normalize_input = config.get("normalize_input", False)
 
+        # Load REDQ-specific parameters
+        self.num_critics = self.config.get('num_critics', 10)
+        self.m = self.config.get('critic_subsample_size', 2)
+        self.use_layer_norm = self.config.get('use_layer_norm', True)
+        self.use_dropout = self.config.get('use_dropout', True)
+        self.dropout_prob = self.config.get('dropout_prob', 0.01)
+        self.policy_delay = self.config.get("policy_delay", 1)
+        self.gradient_steps = self.config.get('gradient_steps', 1)  # Default of 1 gradient step per env step
+        self.policy_delay_offset = self.config.get('policy_delay_offset', 0)
+        self.q_target_mode = self.config.get('q_target_mode', 'ave')  # Add this line
+
         # TODO: double-check! To use bootstrap instead?
         self.max_env_steps = config.get("max_env_steps", 1000) # temporary, in future we will use other approach
 
@@ -74,7 +85,7 @@ class SACAgent(BaseAlgorithm):
 
         self.critic_optimizers = [
             torch.optim.Adam(critic.parameters(), lr=float(self.config["critic_lr"]), betas=self.config.get("critic_betas", [0.9, 0.999]))
-            for critic in self.model.sac_network.critics
+            for critic in self.model.sac_network.critic.critics
         ]
 
         self.log_alpha_optimizer = torch.optim.Adam([self.log_alpha],
@@ -95,27 +106,11 @@ class SACAgent(BaseAlgorithm):
         self.actor_loss_info = (torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0))
 
     def load_networks(self, params):
+
         builder = model_builder.ModelBuilder()
         self.config['network'] = builder.load(params)
         print("[DEBUG] Loaded network from ModelBuilder.")
 
-        # Load REDQ-specific parameters
-        self.num_critics = self.config.get('num_critics', 10)
-        self.m = self.config.get('critic_subsample_size', 2)
-        self.use_layer_norm = self.config.get('use_layer_norm', True)
-        self.use_dropout = self.config.get('use_dropout', True)
-        self.dropout_prob = self.config.get('dropout_prob', 0.01)
-        self.policy_delay = self.config.get("policy_delay", 1)
-        self.gradient_steps = self.config.get('gradient_steps', 1)  # Default of 1 gradient step per env step
-        self.policy_delay_offset = self.config.get('policy_delay_offset', 0)
-        self.q_target_mode = self.config.get('q_target_mode', 'ave')  # Add this line
-
-
-        print(f"[DEBUG] REDQ Config - num_critics: {self.num_critics}, "
-            f"critic_subsample_size: {self.m}, "
-            f"use_layer_norm: {self.use_layer_norm}, "
-            f"use_dropout: {self.use_dropout}, "
-            f"dropout_prob: {self.dropout_prob}")
 
     def base_init(self, base_name, config):
         self.env_config = config.get('env_config', {})
@@ -319,7 +314,9 @@ class SACAgent(BaseAlgorithm):
 
             # Get target Q-values from the ensemble of target critics
             target_Q_values = self.model.sac_network.critic_target(next_obs, next_action)
-            assert target_Q_values.shape == (self.num_critics, batch_size, 1), f"Unexpected shape for target_Q_values: {target_Q_values.shape}"
+            # print("num_critics", self.num_critics)
+            # print("batch_size", self.batch_size)
+            assert target_Q_values.shape == (self.num_critics, self.batch_size), f"Unexpected shape for target_Q_values: {target_Q_values.shape}"
             # print(f"[DEBUG] Target Q Values from all critics: {target_Q_values}")
 
             if self.q_target_mode == 'min':
@@ -352,19 +349,21 @@ class SACAgent(BaseAlgorithm):
         current_Q_values = self.model.sac_network.critic(obs, action)
         # print(f"[DEBUG] Current Q Values from all critics: {current_Q_values}")
 
+        # Update all critics
+        for optimizer in self.critic_optimizers:
+            optimizer.zero_grad(set_to_none=True)
         # Compute critic loss over all critics
         critic_losses = []
-        critic_loss = 0
+        critic_loss = torch.zeros(1, device=self.ppo_device)
         for i in range(self.num_critics):
             current_Q = current_Q_values[i, :].unsqueeze(-1)
             loss = self.c_loss(current_Q, target_Q)
             critic_losses.append(loss.detach())
             critic_loss += loss
+        critic_loss.backward()
 
-            # Update the critic using its specific optimizer
-            self.critic_optimizers[i].zero_grad(set_to_none=True)
-            loss.backward()
-            self.critic_optimizers[i].step()
+        for optimizer in self.critic_optimizers:
+            optimizer.step()
 
         critic_loss = critic_loss / self.num_critics
 
@@ -390,7 +389,7 @@ class SACAgent(BaseAlgorithm):
         # Get Q-values from all critics
         actor_Qs = self.model.sac_network.critic(obs, action)
         # print(f"[DEBUG] Actor Qs from all critics: {actor_Qs}")
-        assert actor_Qs.shape == (self.num_critics, batch_size, 1), f"Unexpected shape for actor_Qs: {actor_Qs.shape}"
+        assert actor_Qs.shape == (self.num_critics, self.batch_size), f"Unexpected shape for actor_Qs: {actor_Qs.shape}"
 
         # Log Q-values from all critics
         for idx in range(self.num_critics):
@@ -398,7 +397,7 @@ class SACAgent(BaseAlgorithm):
             self.writer.add_scalar(f'values/actor_Q_critic_{idx}', q_values, self.frame)
 
         actor_Q = torch.min(actor_Qs, dim=0)[0].unsqueeze(-1)
-        assert actor_Q.shape == (batch_size, 1), f"Unexpected shape for actor_Q: {actor_Q.shape}"
+        assert actor_Q.shape == (self.batch_size, 1), f"Unexpected shape for actor_Q: {actor_Q.shape}"
         # print(f"[DEBUG] Actor Q (min over critics): {actor_Q}")
 
         actor_loss = (torch.max(self.alpha.detach(), self.min_alpha) * log_prob - actor_Q)
@@ -433,7 +432,7 @@ class SACAgent(BaseAlgorithm):
                                     (1.0 - tau) * target_param.data)
 
     def update(self):
-        total_batch_size = min(self.batch_size * self.gradient_steps, len(self.replay_buffer))
+        total_batch_size = min(self.batch_size * self.gradient_steps, self.replay_buffer_size)
         obs, action, reward, next_obs, done = self.replay_buffer.sample(total_batch_size)
 
         # Ensure total_batch_size is divisible by gradient_steps
