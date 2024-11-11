@@ -968,7 +968,7 @@ class SACBuilder(NetworkBuilder):
                 'norm_func_name' : self.normalization,
                 'dense_func' : torch.nn.Linear,
                 'd2rl' : self.is_d2rl,
-                'norm_only_first_layer' : self.norm_only_first_layer,
+                # 'norm_only_first_layer' : self.norm_only_first_layer,
             }
             critic_mlp_args = {
                 'input_size' : obs_dim + action_dim, 

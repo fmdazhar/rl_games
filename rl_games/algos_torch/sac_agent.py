@@ -46,7 +46,7 @@ class SACAgent(BaseAlgorithm):
         self.dropout_prob = self.config.get('dropout_prob', 0.01)
         self.policy_delay = self.config.get("policy_delay", 1)
         self.gradient_steps = self.config.get('gradient_steps', 1)  # Default of 1 gradient step per env step
-        self.policy_delay_offset = self.config.get('policy_delay_offset', 0)
+        self.policy_delay_offset = self.config.get('policy_delay_offset', 1)
         self.q_target_mode = self.config.get('q_target_mode', 'ave')  # Add this line
 
         # TODO: double-check! To use bootstrap instead?
@@ -365,7 +365,7 @@ class SACAgent(BaseAlgorithm):
         for optimizer in self.critic_optimizers:
             optimizer.step()
 
-        critic_loss = critic_loss / self.num_critics
+        critic_loss = torch.stack(critic_losses).mean()
 
         # print(f"[DEBUG] Critic Loss: {critic_loss}")
 
@@ -460,7 +460,7 @@ class SACAgent(BaseAlgorithm):
             critic_loss, critic_losses = self.update_critic(obs_i, action_i, reward_i, next_obs_i, not_done_i)
 
             # Update actor and alpha if needed
-            if (self.update_step + self.policy_delay_offset)% self.policy_delay == 0:
+            if (self.update_step + self.policy_delay_offset) % self.policy_delay == 0:
                 actor_loss, entropy, alpha, alpha_loss = self.update_actor_and_alpha(obs_i)
                 self.actor_loss_info = actor_loss, entropy, alpha, alpha_loss
 
