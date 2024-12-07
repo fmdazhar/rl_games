@@ -280,8 +280,6 @@ class A2CBuilder(NetworkBuilder):
                 'dense_func' : torch.nn.Linear,
                 'd2rl' : self.is_d2rl,
                 'norm_only_first_layer' : self.norm_only_first_layer,
-                'use_dropout' : self.use_dropout,
-                'dropout_prob' : self.dropout_prob
             }
             self.actor_mlp = self._build_mlp(**mlp_args)
             if self.separate:
@@ -965,7 +963,7 @@ class SACBuilder(NetworkBuilder):
                 'input_size' : obs_dim, 
                 'units' : self.units, 
                 'activation' : self.activation, 
-                'norm_func_name' : self.normalization,
+                # 'norm_func_name' : self.normalization,
                 'dense_func' : torch.nn.Linear,
                 'd2rl' : self.is_d2rl,
                 # 'norm_only_first_layer' : self.norm_only_first_layer,
