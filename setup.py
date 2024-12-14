@@ -45,5 +45,6 @@ setup(name='rl-games',
             'psutil',
             'pyyaml',
             'watchdog>=2.1.9,<3.0.0',  # for evaluation process
+            'ray',
       ],
       )
